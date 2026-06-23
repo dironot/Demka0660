@@ -1,0 +1,377 @@
+######################################################################
+# МОДУЛЬ 1 — копипаст. Сверь имена интерфейсов (ip -c a) перед вставкой!
+# Адресация: HQ-SRV/VLAN100 .1.0/27 | HQ-CLI/VLAN200 .2.0/28
+#            MGMT/VLAN999 .99.0/29 | BR-SRV .3.0/28
+#            ISP-HQ 172.16.1.0/28 | ISP-BR 172.16.2.0/28 | GRE 192.168.5.0/30
+######################################################################
+
+
+#=====================================================================
+# П.1+П.4  HQ-RTR (имя, интерфейсы, VLAN)
+#=====================================================================
+hostnamectl hostname hq-rtr.au-team.irpo; exec bash
+
+mkdir -p /etc/net/ifaces/vlan100 /etc/net/ifaces/vlan200 /etc/net/ifaces/vlan999
+echo TYPE=eth > /etc/net/ifaces/enp7s1/options
+echo TYPE=eth > /etc/net/ifaces/enp7s2/options
+
+cat > /etc/net/ifaces/vlan100/options << 'EOF'
+TYPE=vlan
+HOST=enp7s2
+VID=100
+EOF
+cat > /etc/net/ifaces/vlan200/options << 'EOF'
+TYPE=vlan
+HOST=enp7s2
+VID=200
+EOF
+cat > /etc/net/ifaces/vlan999/options << 'EOF'
+TYPE=vlan
+HOST=enp7s2
+VID=999
+EOF
+
+echo 192.168.1.1/27  > /etc/net/ifaces/vlan100/ipv4address
+echo 192.168.2.1/28  > /etc/net/ifaces/vlan200/ipv4address
+echo 192.168.99.1/29 > /etc/net/ifaces/vlan999/ipv4address
+echo 172.16.1.10/28  > /etc/net/ifaces/enp7s1/ipv4address
+echo default via 172.16.1.1 > /etc/net/ifaces/enp7s1/ipv4route
+systemctl restart network
+
+
+#=====================================================================
+# П.1  HQ-SRV
+#=====================================================================
+hostnamectl hostname hq-srv.au-team.irpo; exec bash
+
+echo TYPE=eth > /etc/net/ifaces/enp7s1/options
+echo 192.168.1.10/27 > /etc/net/ifaces/enp7s1/ipv4address
+echo default via 192.168.1.1 > /etc/net/ifaces/enp7s1/ipv4route
+systemctl restart network
+
+
+#=====================================================================
+# П.1  HQ-CLI (статика для проверки; позже DHCP в П.9)
+#=====================================================================
+hostnamectl hostname hq-cli.au-team.irpo
+
+echo TYPE=eth > /etc/net/ifaces/enp7s1/options
+echo 192.168.2.10/28 > /etc/net/ifaces/enp7s1/ipv4address
+echo default via 192.168.2.1 > /etc/net/ifaces/enp7s1/ipv4route
+reboot
+
+
+#=====================================================================
+# П.1  BR-RTR
+#=====================================================================
+hostnamectl hostname br-rtr.au-team.irpo; exec bash
+
+mkdir -p /etc/net/ifaces/enp7s2
+echo TYPE=eth > /etc/net/ifaces/enp7s1/options
+echo TYPE=eth > /etc/net/ifaces/enp7s2/options
+echo 172.16.2.10/28 > /etc/net/ifaces/enp7s1/ipv4address
+echo default via 172.16.2.1 > /etc/net/ifaces/enp7s1/ipv4route
+echo 192.168.3.1/28 > /etc/net/ifaces/enp7s2/ipv4address
+systemctl restart network
+
+
+#=====================================================================
+# П.1  BR-SRV
+#=====================================================================
+hostnamectl hostname br-srv.au-team.irpo; exec bash
+
+echo TYPE=eth > /etc/net/ifaces/enp7s1/options
+echo 192.168.3.10/28 > /etc/net/ifaces/enp7s1/ipv4address
+echo default via 192.168.3.1 > /etc/net/ifaces/enp7s1/ipv4route
+systemctl restart network
+
+
+#=====================================================================
+# П.2  ISP (интернет + NAT в сторону провайдера)
+# enp7s1 — провайдер (DHCP), enp7s2 — HQ, enp7s3 — BR
+#=====================================================================
+hostnamectl hostname ISP; exec bash
+
+mkdir -p /etc/net/ifaces/enp7s2 /etc/net/ifaces/enp7s3
+cat > /etc/net/ifaces/enp7s1/options << 'EOF'
+TYPE=eth
+BOOTPROTO=dhcp
+EOF
+echo TYPE=eth > /etc/net/ifaces/enp7s2/options
+echo TYPE=eth > /etc/net/ifaces/enp7s3/options
+echo 172.16.1.1/28 > /etc/net/ifaces/enp7s2/ipv4address
+echo 172.16.2.1/28 > /etc/net/ifaces/enp7s3/ipv4address
+systemctl restart network
+
+echo 'net.ipv4.ip_forward = 1' >> /etc/net/sysctl.conf
+apt-get update && apt-get install iptables -y
+iptables -t nat -A POSTROUTING -o enp7s1 -s 0/0 -j MASQUERADE
+iptables-save > /etc/sysconfig/iptables
+systemctl enable --now iptables && systemctl restart iptables network
+
+# проверка с HQ-RTR / BR-RTR:
+echo 'nameserver 8.8.8.8' > /etc/resolv.conf
+ping -c3 8.8.8.8
+ping -c3 ya.ru
+
+
+#=====================================================================
+# П.3  Пользователи  —  HQ-RTR + BR-RTR (net_admin)
+#=====================================================================
+useradd net_admin
+echo 'net_admin:P@ssw0rd' | chpasswd
+apt-get update && apt-get install sudo -y
+usermod -aG wheel net_admin
+sed -i 's/^#\s*%wheel\s*ALL=(ALL:ALL)\s*NOPASSWD: ALL/%wheel ALL=(ALL:ALL) NOPASSWD: ALL/' /etc/sudoers
+grep NOPASSWD /etc/sudoers
+
+
+#=====================================================================
+# П.3  Пользователи  —  HQ-SRV + BR-SRV (sshuser, UID 2026)
+#=====================================================================
+useradd sshuser -u 2026
+echo 'sshuser:P@ssw0rd' | chpasswd
+gpasswd -a sshuser wheel
+sed -i 's/^#\s*%wheel\s*ALL=(ALL:ALL)\s*NOPASSWD: ALL/%wheel ALL=(ALL:ALL) NOPASSWD: ALL/' /etc/sudoers
+id sshuser
+grep NOPASSWD /etc/sudoers
+
+
+#=====================================================================
+# П.5  SSH  —  HQ-SRV + BR-SRV (порт 2026, баннер, 2 попытки, only sshuser)
+#=====================================================================
+echo 'Authorized access only' > /etc/openssh/banner
+sed -i 's/^#*Port .*/Port 2026/' /etc/openssh/sshd_config
+sed -i 's/^#*MaxAuthTries .*/MaxAuthTries 2/' /etc/openssh/sshd_config
+sed -i 's#^#*Banner .*#Banner /etc/openssh/banner#' /etc/openssh/sshd_config
+echo 'AllowUsers sshuser' >> /etc/openssh/sshd_config
+systemctl restart sshd
+
+
+#=====================================================================
+# П.6  GRE-туннель  —  HQ-RTR
+#=====================================================================
+mkdir -p /etc/net/ifaces/gre1
+cat > /etc/net/ifaces/gre1/options << 'EOF'
+TYPE=iptun
+TUNTYPE=gre
+TUNLOCAL=172.16.1.10
+TUNREMOTE=172.16.2.10
+TUNOPTIONS='ttl 64'
+HOST=enp7s1
+MULTICAST=yes
+EOF
+echo '192.168.5.1/30' > /etc/net/ifaces/gre1/ipv4address
+modprobe gre
+systemctl restart network
+
+
+#=====================================================================
+# П.6  GRE-туннель  —  BR-RTR
+#=====================================================================
+mkdir -p /etc/net/ifaces/gre1
+cat > /etc/net/ifaces/gre1/options << 'EOF'
+TYPE=iptun
+TUNTYPE=gre
+TUNLOCAL=172.16.2.10
+TUNREMOTE=172.16.1.10
+TUNOPTIONS='ttl 64'
+HOST=enp7s1
+MULTICAST=yes
+EOF
+echo '192.168.5.2/30' > /etc/net/ifaces/gre1/ipv4address
+modprobe gre
+systemctl restart network
+
+
+#=====================================================================
+# П.7  OSPF (FRR)  —  HQ-RTR
+#=====================================================================
+apt-get update && apt-get install frr -y
+sed -i 's/^ospfd=no/ospfd=yes/' /etc/frr/daemons
+systemctl enable --now frr
+
+vtysh
+conf t
+router ospf
+ passive-interface default
+ network 192.168.1.0/27 area 0
+ network 192.168.2.0/28 area 0
+ network 192.168.5.0/30 area 0
+exit
+interface gre1
+ no ip ospf passive
+ ip ospf authentication message-digest
+ ip ospf message-digest-key 1 md5 P@ssw0rd
+end
+wr
+exit
+
+
+#=====================================================================
+# П.7  OSPF (FRR)  —  BR-RTR
+#=====================================================================
+apt-get update && apt-get install frr -y
+sed -i 's/^ospfd=no/ospfd=yes/' /etc/frr/daemons
+systemctl enable --now frr
+
+vtysh
+conf t
+router ospf
+ passive-interface default
+ network 192.168.3.0/28 area 0
+ network 192.168.5.0/30 area 0
+exit
+interface gre1
+ no ip ospf passive
+ ip ospf authentication message-digest
+ ip ospf message-digest-key 1 md5 P@ssw0rd
+end
+wr
+exit
+
+# проверка (на любом роутере):
+vtysh -c 'show ip ospf neighbor'
+vtysh -c 'show ip route ospf'
+
+
+#=====================================================================
+# П.8  NAT  —  HQ-RTR + BR-RTR (в сторону ISP)
+#=====================================================================
+echo 'net.ipv4.ip_forward = 1' >> /etc/net/sysctl.conf
+apt-get update && apt-get install iptables -y
+iptables -t nat -A POSTROUTING -o enp7s1 -s 0/0 -j MASQUERADE
+iptables-save > /etc/sysconfig/iptables
+systemctl enable --now iptables && systemctl restart network iptables
+
+
+#=====================================================================
+# П.9  DHCP  —  HQ-RTR (сервер для HQ-CLI / VLAN200)
+#=====================================================================
+apt-get update && apt-get install dhcp-server -y
+echo 'DHCPDARGS=vlan200' > /etc/sysconfig/dhcpd
+cp /etc/dhcp/dhcpd.conf.sample /etc/dhcp/dhcpd.conf
+
+cat > /etc/dhcp/dhcpd.conf << 'EOF'
+ddns-update-style none;
+subnet 192.168.2.0 netmask 255.255.255.240 {
+    option routers              192.168.2.1;
+    option subnet-mask          255.255.255.240;
+    option domain-name          "au-team.irpo";
+    option domain-name-servers  192.168.1.10;
+    range dynamic-bootp 192.168.2.10 192.168.2.10;
+    default-lease-time 21600;
+    max-lease-time 43200;
+}
+EOF
+
+dhcpd -t -cf /etc/dhcp/dhcpd.conf
+systemctl enable --now dhcpd
+
+
+#=====================================================================
+# П.9  DHCP-клиент  —  HQ-CLI
+#=====================================================================
+cat > /etc/net/ifaces/enp7s1/options << 'EOF'
+TYPE=eth
+BOOTPROTO=dhcp
+EOF
+rm -f /etc/net/ifaces/enp7s1/ipv4address /etc/net/ifaces/enp7s1/ipv4route
+systemctl restart network
+ip -c a
+
+
+#=====================================================================
+# П.10  DNS (BIND)  —  HQ-SRV
+#=====================================================================
+apt-get update && apt-get install bind bind-utils -y
+
+# --- options.conf (правь нужные строки вручную) ---
+# listen-on { 192.168.1.10; };
+# listen-on-v6 { none; };
+# forwarders { 8.8.8.8; };
+# allow-query { any; };
+# allow-recursion { any; };
+vim /var/lib/bind/etc/options.conf
+
+cat >> /var/lib/bind/etc/rfc1912.conf << 'EOF'
+zone "au-team.irpo"           { type master; file "au-team.irpo"; };
+zone "1.168.192.in-addr.arpa" { type master; file "1.168.192.in-addr.arpa"; };
+zone "2.168.192.in-addr.arpa" { type master; file "2.168.192.in-addr.arpa"; };
+EOF
+
+cd /var/lib/bind/etc/zone
+cp empty au-team.irpo
+cp empty 1.168.192.in-addr.arpa
+cp empty 2.168.192.in-addr.arpa
+
+cat > au-team.irpo << 'EOF'
+$TTL    1D
+@       IN      SOA     au-team.irpo. root.au-team.irpo. (
+                                2025110500
+                                12H
+                                1H
+                                1W
+                                1H )
+@       IN      NS      hq-srv.au-team.irpo.
+hq-srv  IN      A       192.168.1.10
+hq-rtr  IN      A       192.168.1.1
+hq-cli  IN      A       192.168.2.10
+br-rtr  IN      A       192.168.3.1
+br-srv  IN      A       192.168.3.10
+docker  IN      A       172.16.1.1
+web     IN      A       172.16.2.1
+EOF
+
+cat > 1.168.192.in-addr.arpa << 'EOF'
+$TTL    1D
+@       IN      SOA     au-team.irpo. root.au-team.irpo. (
+                                2025110500
+                                12H
+                                1H
+                                1W
+                                1H )
+@       IN      NS      hq-srv.au-team.irpo.
+1       IN      PTR     hq-rtr.au-team.irpo.
+10      IN      PTR     hq-srv.au-team.irpo.
+EOF
+
+cat > 2.168.192.in-addr.arpa << 'EOF'
+$TTL    1D
+@       IN      SOA     au-team.irpo. root.au-team.irpo. (
+                                2025110500
+                                12H
+                                1H
+                                1W
+                                1H )
+@       IN      NS      hq-srv.au-team.irpo.
+10      IN      PTR     hq-cli.au-team.irpo.
+EOF
+
+chown -R named:named /var/lib/bind/etc/zone/
+chmod 755 /var/lib/bind/etc/zone/
+chmod 644 au-team.irpo 1.168.192.in-addr.arpa 2.168.192.in-addr.arpa
+
+rndc-confgen > /var/lib/bind/etc/rndc.key
+sed -i '6,$d' /var/lib/bind/etc/rndc.key
+
+named-checkconf
+named-checkconf -z
+systemctl enable --now bind
+echo 'nameserver 192.168.1.10' > /etc/resolv.conf
+
+host hq-srv.au-team.irpo
+host 192.168.1.10
+
+
+#=====================================================================
+# П.10  DNS-клиент  —  HQ-CLI + BR-RTR + BR-SRV
+#=====================================================================
+echo 'nameserver 192.168.1.10' > /etc/resolv.conf
+
+
+#=====================================================================
+# П.11  Часовой пояс (Уфа = Asia/Yekaterinburg) — на всех устройствах
+#=====================================================================
+apt-get update && apt-get reinstall tzdata -y
+timedatectl set-timezone Asia/Yekaterinburg

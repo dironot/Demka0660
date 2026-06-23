@@ -1,0 +1,394 @@
+# Демоэкзамен 09.02.06 --- Полный гайд настройки (Модуль 1)
+
+# ============================================
+# Шаг 0. Proxmox --- настройка VLAN тегов
+# ============================================
+# В Proxmox для HQ-RTR на интерфейсе enp7s2 (LAN) --- НЕ ставь VLAN tag, этот адаптер будет trunk.
+# На HQ-SRV → сетевой адаптер → VLAN Tag: 100
+# На HQ-CLI → сетевой адаптер → VLAN Tag: 200
+# Если нужна management машина в VLAN999 --- ставь Tag: 999.
+# На адаптере trunk (enp7s2 HQ-RTR) поставь галку "VLAN aware" у Linux Bridge в Proxmox.
+
+
+# ============================================
+# Шаг 1. Имена машин (hostnamectl)
+# ============================================
+# ISP
+hostnamectl set-hostname isp.solaredge.local; exec bash
+
+# HQ-RTR
+hostnamectl set-hostname hq-rtr.solaredge.local; exec bash
+
+# BR-RTR
+hostnamectl set-hostname br-rtr.solaredge.local; exec bash
+
+# HQ-SRV
+hostnamectl set-hostname hq-srv.solaredge.local; exec bash
+
+# BR-SRV
+hostnamectl set-hostname br-srv.solaredge.local; exec bash
+
+# HQ-CLI
+hostnamectl set-hostname hq-cli.solaredge.local; exec bash
+
+
+# ============================================
+# Шаг 2. IP-адресация через etcnet
+# ============================================
+
+### ISP
+mkdir -p /etc/net/ifaces/enp7s1
+cat > /etc/net/ifaces/enp7s1/options << 'EOF'
+TYPE=eth
+BOOTPROTO=dhcp
+EOF
+
+mkdir -p /etc/net/ifaces/enp7s2
+cat > /etc/net/ifaces/enp7s2/options << 'EOF'
+TYPE=eth
+BOOTPROTO=static
+EOF
+echo "172.16.4.1/28" > /etc/net/ifaces/enp7s2/ipv4address
+
+mkdir -p /etc/net/ifaces/enp7s3
+cat > /etc/net/ifaces/enp7s3/options << 'EOF'
+TYPE=eth
+BOOTPROTO=static
+EOF
+echo "172.16.5.1/28" > /etc/net/ifaces/enp7s3/ipv4address
+
+systemctl restart network
+
+### HQ-RTR
+mkdir -p /etc/net/ifaces/enp7s1
+cat > /etc/net/ifaces/enp7s1/options << 'EOF'
+TYPE=eth
+BOOTPROTO=static
+EOF
+echo "172.16.4.2/28" > /etc/net/ifaces/enp7s1/ipv4address
+echo "default via 172.16.4.1" > /etc/net/ifaces/enp7s1/ipv4route
+
+mkdir -p /etc/net/ifaces/enp7s2
+cat > /etc/net/ifaces/enp7s2/options << 'EOF'
+TYPE=eth
+BOOTPROTO=static
+EOF
+
+# VLAN100
+mkdir -p /etc/net/ifaces/enp7s2.100
+cat > /etc/net/ifaces/enp7s2.100/options << 'EOF'
+TYPE=vlan
+BOOTPROTO=static
+VID=100
+HOST=enp7s2
+EOF
+echo "192.168.100.1/28" > /etc/net/ifaces/enp7s2.100/ipv4address
+
+# VLAN200
+mkdir -p /etc/net/ifaces/enp7s2.200
+cat > /etc/net/ifaces/enp7s2.200/options << 'EOF'
+TYPE=vlan
+BOOTPROTO=static
+VID=200
+HOST=enp7s2
+EOF
+echo "192.168.200.1/25" > /etc/net/ifaces/enp7s2.200/ipv4address
+
+# VLAN999
+mkdir -p /etc/net/ifaces/enp7s2.999
+cat > /etc/net/ifaces/enp7s2.999/options << 'EOF'
+TYPE=vlan
+BOOTPROTO=static
+VID=999
+HOST=enp7s2
+EOF
+echo "192.168.99.1/26" > /etc/net/ifaces/enp7s2.999/ipv4address
+
+systemctl restart network
+
+### BR-RTR
+mkdir -p /etc/net/ifaces/enp7s1
+cat > /etc/net/ifaces/enp7s1/options << 'EOF'
+TYPE=eth
+BOOTPROTO=static
+EOF
+echo "172.16.5.2/28" > /etc/net/ifaces/enp7s1/ipv4address
+echo "default via 172.16.5.1" > /etc/net/ifaces/enp7s1/ipv4route
+
+mkdir -p /etc/net/ifaces/enp7s2
+cat > /etc/net/ifaces/enp7s2/options << 'EOF'
+TYPE=eth
+BOOTPROTO=static
+EOF
+echo "192.168.30.1/27" > /etc/net/ifaces/enp7s2/ipv4address
+
+systemctl restart network
+
+### HQ-SRV
+mkdir -p /etc/net/ifaces/enp7s1
+cat > /etc/net/ifaces/enp7s1/options << 'EOF'
+TYPE=eth
+BOOTPROTO=static
+EOF
+echo "192.168.100.2/28" > /etc/net/ifaces/enp7s1/ipv4address
+echo "default via 192.168.100.1" > /etc/net/ifaces/enp7s1/ipv4route
+cat > /etc/resolv.conf << 'EOF'
+nameserver 8.8.8.8
+EOF
+
+systemctl restart network
+
+### BR-SRV
+mkdir -p /etc/net/ifaces/enp7s1
+cat > /etc/net/ifaces/enp7s1/options << 'EOF'
+TYPE=eth
+BOOTPROTO=static
+EOF
+echo "192.168.30.2/27" > /etc/net/ifaces/enp7s1/ipv4address
+echo "default via 192.168.30.1" > /etc/net/ifaces/enp7s1/ipv4route
+
+systemctl restart network
+
+### HQ-CLI
+cat > /etc/net/ifaces/enp7s1/options << 'EOF'
+TYPE=eth
+BOOTPROTO=dhcp
+EOF
+systemctl restart network
+
+
+# ============================================
+# Шаг 3. Forwarding и NAT
+# ============================================
+
+### ISP
+sed -i 's/net.ipv4.ip_forward = 0/net.ipv4.ip_forward = 1/g' /etc/net/sysctl.conf
+echo "net.ipv4.ip_forward = 1" >> /etc/net/sysctl.conf
+sysctl -p /etc/net/sysctl.conf
+
+apt-get update && apt-get install -y iptables
+
+iptables -t nat -A POSTROUTING -o enp7s1 -j MASQUERADE
+iptables -A FORWARD -j ACCEPT
+
+iptables-save > /etc/sysconfig/iptables
+systemctl enable --now iptables
+
+### HQ-RTR
+sed -i 's/net.ipv4.ip_forward = 0/net.ipv4.ip_forward = 1/g' /etc/net/sysctl.conf
+sysctl -p /etc/net/sysctl.conf
+
+apt-get update && apt-get install -y iptables
+
+iptables -t nat -A POSTROUTING -o enp7s1 -j MASQUERADE
+iptables -A FORWARD -j ACCEPT
+
+iptables-save > /etc/sysconfig/iptables
+systemctl enable --now iptables
+
+### BR-RTR
+sed -i 's/net.ipv4.ip_forward = 0/net.ipv4.ip_forward = 1/g' /etc/net/sysctl.conf
+echo "net.ipv4.ip_forward = 1" >> /etc/net/sysctl.conf
+sysctl -p /etc/net/sysctl.conf
+
+apt-get update && apt-get install -y iptables
+
+iptables -t nat -A POSTROUTING -o enp7s1 -j MASQUERADE
+iptables -A FORWARD -j ACCEPT
+
+iptables-save > /etc/sysconfig/iptables
+systemctl enable --now iptables
+
+
+# ============================================
+# Шаг 4. Пользователи
+# ============================================
+
+### HQ-SRV и BR-SRV --- quantumquokka (UID 1014)
+useradd -u 1014 quantumquokka
+passwd quantumquokka
+# Вводим: P@ssw0rd
+
+usermod -aG wheel quantumquokka
+sed -i 's/^#\s*%wheel\s*ALL=(ALL:ALL)\s*NOPASSWD: ALL/%wheel ALL=(ALL:ALL) NOPASSWD: ALL/' /etc/sudoers
+grep NOPASSWD /etc/sudoers
+
+### HQ-RTR и BR-RTR --- vpnpenguin
+useradd vpnpenguin
+passwd vpnpenguin
+# Вводим: P@$$word
+
+usermod -aG wheel vpnpenguin
+sed -i 's/^#\s*%wheel\s*ALL=(ALL:ALL)\s*NOPASSWD: ALL/%wheel ALL=(ALL:ALL) NOPASSWD: ALL/' /etc/sudoers
+
+
+# ============================================
+# Шаг 5. GRE туннель
+# ============================================
+
+apt-get install -y kmod
+modprobe gre
+
+### HQ-RTR
+mkdir /etc/net/ifaces/gre1
+cat > /etc/net/ifaces/gre1/options << 'EOF'
+TYPE=iptun
+TUNTYPE=gre
+TUNLOCAL=172.16.4.2
+TUNREMOTE=172.16.5.2
+TUNOPTIONS='ttl 64'
+HOST=enp7s1
+BOOTPROTO=static
+MULTICAST=yes
+EOF
+echo "10.0.0.1/30" > /etc/net/ifaces/gre1/ipv4address
+
+### BR-RTR
+mkdir /etc/net/ifaces/gre1
+cat > /etc/net/ifaces/gre1/options << 'EOF'
+TYPE=iptun
+TUNTYPE=gre
+TUNLOCAL=172.16.5.2
+TUNREMOTE=172.16.4.2
+TUNOPTIONS='ttl 64'
+HOST=enp7s1
+BOOTPROTO=static
+MULTICAST=yes
+EOF
+echo "10.0.0.2/30" > /etc/net/ifaces/gre1/ipv4address
+
+systemctl restart network
+ip link set gre1 up
+ip link set gre1 multicast on
+
+
+# ============================================
+# Шаг 6. OSPF через FRR
+# ============================================
+
+apt-get install -y frr
+sed -i 's/ospfd=no/ospfd=yes/' /etc/frr/daemons
+systemctl enable --now frr
+
+### HQ-RTR
+vtysh << 'EOF'
+conf t
+router ospf
+ passive-interface default
+ network 10.0.0.0/30 area 0
+ network 192.168.100.0/28 area 0
+ network 192.168.200.0/25 area 0
+ network 192.168.99.0/26 area 0
+ exit
+ interface gre1
+  no ip ospf passive
+  ip ospf authentication message-digest
+  ip ospf message-digest-key 1 md5 P@ssw0rd
+ end
+ write
+EOF
+
+### BR-RTR
+vtysh << 'EOF'
+conf t
+router ospf
+ passive-interface default
+ network 10.0.0.0/30 area 0
+ network 192.168.30.0/27 area 0
+ exit
+ interface gre1
+  no ip ospf passive
+  ip ospf authentication message-digest
+  ip ospf message-digest-key 1 md5 P@ssw0rd
+ end
+ write
+EOF
+
+# Проверка
+vtysh -c "show ip ospf neighbor"
+vtysh -c "show ip route ospf"
+
+# Сброс FRR если что-то пошло не так
+# systemctl stop frr
+# echo "" > /etc/frr/frr.conf
+# systemctl start frr
+
+
+# ============================================
+# Шаг 7. DHCP на HQ-RTR для VLAN200
+# ============================================
+
+apt-get install -y dhcp-server
+
+cat > /etc/dhcp/dhcpd.conf << 'EOF'
+subnet 192.168.200.0 netmask 255.255.255.128 {
+  range 192.168.200.2 192.168.200.23;
+  option routers 192.168.200.1;
+  option domain-name-servers 192.168.100.2;
+  option domain-name "solaredge.local";
+}
+EOF
+
+echo 'DHCPDARGS="enp7s2.200"' > /etc/sysconfig/dhcpd
+systemctl enable --now dhcpd
+
+
+# ============================================
+# Шаг 8. SSH на HQ-SRV и BR-SRV
+# ============================================
+
+cat >> /etc/openssh/sshd_config << 'EOF'
+
+Port 2033
+AllowUsers quantumquokka
+MaxAuthTries 2
+PasswordAuthentication yes
+Banner /etc/openssh/banner
+EOF
+
+echo "Authorized access only." > /etc/openssh/banner
+systemctl restart sshd
+
+# Проверка с другой машины:
+# ssh -p 2033 quantumquokka@192.168.100.2
+
+
+# ============================================
+# Шаг 9. DNS (dnsmasq) на HQ-SRV
+# ============================================
+
+apt-get update && apt-get install -y dnsmasq
+
+cat > /etc/dnsmasq.conf << 'EOF'
+interface=enp7s1
+listen-address=192.168.100.2,127.0.0.1
+domain=solaredge.local
+server=77.88.8.7
+server=77.88.8.3
+server=8.8.8.8
+no-resolv
+
+host-record=hq-rtr.solaredge.local,192.168.100.1
+host-record=hq-srv.solaredge.local,192.168.100.2
+host-record=hq-cli.solaredge.local,192.168.200.2
+host-record=br-rtr.solaredge.local,192.168.30.1
+host-record=br-srv.solaredge.local,192.168.30.2
+host-record=moodle.solaredge.local,172.16.4.1
+host-record=wiki.solaredge.local,172.16.4.1
+
+ptr-record=1.100.168.192.in-addr.arpa,hq-rtr.solaredge.local
+ptr-record=2.100.168.192.in-addr.arpa,hq-srv.solaredge.local
+ptr-record=2.200.168.192.in-addr.arpa,hq-cli.solaredge.local
+EOF
+
+systemctl enable --now dnsmasq
+systemctl status dnsmasq
+
+
+# ============================================
+# Шаг 10. Часовые пояса (на всех машинах)
+# ============================================
+
+apt-get install -y tzdata
+timedatectl set-timezone Asia/Yekaterinburg
+timedatectl
